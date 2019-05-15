@@ -101,7 +101,7 @@ public final class AnalyzeSaturationMutagenesis extends GATKTool {
     @VisibleForTesting static int minLength = 15;
 
     @Argument(doc = "minimum number of wt calls flanking variant", fullName = "min-flanking-length")
-    @VisibleForTesting static int minFlankingLength = 18;
+    @VisibleForTesting static int minFlankingLength = 2;
 
     @Argument(doc = "reference interval(s) of the ORF (1-based, inclusive), for example, '134-180,214-238' (no spaces)",
             fullName = "orf")
@@ -121,7 +121,7 @@ public final class AnalyzeSaturationMutagenesis extends GATKTool {
     private static boolean pairedMode = true;
 
     @Argument(doc = "write BAM of rejected reads", fullName = "write-rejected-reads")
-    private static boolean writeRejectedReads = true;
+    private static boolean writeRejectedReads = false;
 
     @VisibleForTesting static Reference reference;
     @VisibleForTesting static CodonTracker codonTracker; // device for turning SNVs into CodonVariations
@@ -131,28 +131,11 @@ public final class AnalyzeSaturationMutagenesis extends GATKTool {
     private static final HopscotchMap<SNVCollectionCount, Long, SNVCollectionCount> variationCounts =
             new HopscotchMap<>(10000000);
 
-    private static final ReadCounts readCounts = new ReadCounts();
-    private static final String[] unpairedLabels = {
-            "Unused category",
-            "Wild type",
-            "Insufficient flank",
-            "Low quality variation",
-            "Called variants" };
-    private static final MoleculeCounts moleculeCountsUnpaired = new MoleculeCounts(unpairedLabels);
-    private static final String[] disjointLabels = {
-            "Mate ignored",
-            "Wild type",
-            "Insufficient flank",
-            "Low quality variation",
-            "Called variants" };
-    private static final MoleculeCounts moleculeCountsDisjointPair = new MoleculeCounts(disjointLabels);
-    private static final String[] overlappingLabels = {
-            "Inconsistent pair",
-            "Wild type",
-            "Insufficient flank",
-            "Low quality variation",
-            "Called variants" };
-    private static final MoleculeCounts moleculeCountsOverlappingPair = new MoleculeCounts(overlappingLabels);
+    private static long totalBaseCalls;
+    private static final ReportTypeCounts readCounts = new ReportTypeCounts();
+    private static final ReportTypeCounts unpairedCounts = new ReportTypeCounts();
+    private static final ReportTypeCounts disjointPairCounts = new ReportTypeCounts();
+    private static final ReportTypeCounts overlappingPairCounts = new ReportTypeCounts();
 
     // a place to stash the first read of a pair during pairwise processing of the read stream
     private GATKRead read1 = null;
@@ -166,8 +149,6 @@ public final class AnalyzeSaturationMutagenesis extends GATKTool {
         "GAA", "GAC", "GAG", "GAT", "GCA", "GCC", "GCG", "GCT", "GGA", "GGC", "GGG", "GGT", "GTA", "GTC", "GTG", "GTT",
         "TAA", "TAC", "TAG", "TAT", "TCA", "TCC", "TCG", "TCT", "TGA", "TGC", "TGG", "TGT", "TTA", "TTC", "TTG", "TTT"
     };
-
-    static final String EXCLUSION_CAUSE_ATTRIBUTE_KEY = "XX";
 
     @Override
     public boolean requiresReads() {
@@ -202,29 +183,46 @@ public final class AnalyzeSaturationMutagenesis extends GATKTool {
         // ignore non-primary alignments
         final Stream<GATKRead> reads = getTransformedReadStream(ReadFilterLibrary.PRIMARY_LINE);
 
-        if ( !pairedMode ) {
-            reads.forEach(read -> processReport(read, getReadReport(read), moleculeCountsUnpaired));
-        } else {
-            read1 = null;
-            reads.forEach(read -> {
-                if ( !read.isPaired() ) {
-                    processReport(read, getReadReport(read), moleculeCountsUnpaired);
-                } else if ( read1 == null ) {
+        try {
+            if ( !pairedMode ) {
+                reads.forEach(read -> {
                     read1 = read;
-                } else if ( !read1.getName().equals(read.getName()) ) {
-                    logger.warn("Read " + read1.getName() + " has no mate.");
-                    processReport(read1, getReadReport(read1), moleculeCountsUnpaired);
-                    read1 = read;
-                } else {
-                    updateCountsForPair(read1, getReadReport(read1), read, getReadReport(read));
-                    read1 = null;
+                    processReport(read, getReadReport(read), unpairedCounts);
+                });
+            } else {
+                read1 = null;
+                reads.forEach(read -> {
+                    if ( !read.isPaired() ) {
+                        if ( read1 != null ) {
+                            processRead1();
+                        }
+                        read1 = read;
+                        processReport(read, getReadReport(read), unpairedCounts);
+                        read1 = null;
+                    } else if ( read1 == null ) {
+                        read1 = read;
+                    } else if ( !read1.getName().equals(read.getName()) ) {
+                        processRead1();
+                        read1 = read;
+                    } else {
+                        updateCountsForPair(read1, getReadReport(read1), read, getReadReport(read));
+                        read1 = null;
+                    }
+                });
+                if ( read1 != null ) {
+                    processRead1();
                 }
-            });
-            if ( read1 != null ) {
-                logger.warn("Read " + read1.getName() + " has no mate.");
-                processReport(read1, getReadReport(read1), moleculeCountsUnpaired);
             }
+        } catch ( final Exception exception ) {
+            throw new GATKException(
+                    "Caught unexpected exception on read " + readCounts.totalCounts() + ": " + read1.getName(),
+                    exception);
         }
+    }
+
+    private void processRead1() {
+        logger.warn("Read " + read1.getName() + " has no mate.");
+        processReport(read1, getReadReport(read1), unpairedCounts);
     }
 
     @Override
@@ -487,46 +485,46 @@ public final class AnalyzeSaturationMutagenesis extends GATKTool {
                       new BufferedWriter(new OutputStreamWriter(BucketUtils.createFile(readCountsFile))) ) {
             final DecimalFormat df = new DecimalFormat("0.000");
 
-            final long totalReads = readCounts.getNReads();
+            final long totalReads = readCounts.totalCounts();
             writer.write("Total Reads:\t" + totalReads + "\t100.000%");
             writer.newLine();
 
-            final long nUnmappedReads = readCounts.getNReadsUnmapped();
+            final long nUnmappedReads = readCounts.getCount(ReportType.UNMAPPED);
             writer.write(">Unmapped Reads:\t" + nUnmappedReads + "\t" +
                     df.format(100. * nUnmappedReads / totalReads) + "%");
             writer.newLine();
 
-            final long nLowQualityReads = readCounts.getNReadsLowQuality();
+            final long nLowQualityReads = readCounts.getCount(ReportType.LOW_QUALITY);
             writer.write(">LowQ Reads:\t" + nLowQualityReads + "\t" +
                     df.format(100. * nLowQualityReads / totalReads) + "%");
             writer.newLine();
 
-            final long nEvaluableReads = readCounts.getNReadsEvaluable();
+            final long nEvaluableReads = readCounts.getCount(ReportType.EVALUABLE);
             writer.write(">Evaluable Reads:\t" + nEvaluableReads + "\t" +
                     df.format(100. * nEvaluableReads / totalReads) + "%");
             writer.newLine();
 
-            final long nUnpairedReads = moleculeCountsUnpaired.getTotal();
+            final long nUnpairedReads = unpairedCounts.totalCounts();
             if ( nUnpairedReads > 0 ) {
                 writer.write(">>Unpaired reads:\t" +  nUnpairedReads + "\t" +
                         df.format(100. * nUnpairedReads / nEvaluableReads) + "%");
                 writer.newLine();
-                writeMoleculeCounts(moleculeCountsUnpaired, df, writer);
+                writeMoleculeCounts(unpairedCounts, df, writer);
             }
 
-            final long nDisjointReads = moleculeCountsDisjointPair.getTotal();
+            final long nDisjointReads = disjointPairCounts.totalCounts();
             writer.write(">>Reads in disjoint pairs evaluated separately:\t" +  nDisjointReads + "\t" +
                     df.format(100. * nDisjointReads / nEvaluableReads) + "%");
             writer.newLine();
-            writeMoleculeCounts(moleculeCountsDisjointPair, df, writer);
+            writeMoleculeCounts(disjointPairCounts, df, writer);
 
-            final long nOverlappingReads = 2 * moleculeCountsOverlappingPair.getTotal();
+            final long nOverlappingReads = 2 * overlappingPairCounts.totalCounts();
             writer.write(">>Reads in overlapping pairs evaluated together:\t" + nOverlappingReads + "\t" +
                     df.format(100. * nOverlappingReads / nEvaluableReads) + "%");
             writer.newLine();
-            writeMoleculeCounts(moleculeCountsOverlappingPair, df, writer);
+            writeMoleculeCounts(overlappingPairCounts, df, writer);
 
-            final long totalBases = readCounts.getNTotalBaseCalls();
+            final long totalBases = totalBaseCalls;
             writer.write("Total base calls:\t" + totalBases + "\t100.000%");
             writer.newLine();
             final long totalCoverage = reference.getTotalCoverage();
@@ -542,31 +540,18 @@ public final class AnalyzeSaturationMutagenesis extends GATKTool {
         }
     }
 
-    private static void writeMoleculeCounts( final MoleculeCounts moleculeCounts,
+    private static void writeMoleculeCounts( final ReportTypeCounts counts,
                                              final DecimalFormat df,
-                                             final BufferedWriter writer )
-            throws IOException {
-        final long nInconsistentPairs = moleculeCounts.getNInconsistentPairs();
-        final long nInsufficientFlankMolecules = moleculeCounts.getNInsufficientFlank();
-        final long nWildTypeMolecules = moleculeCounts.getNWildType();
-        final long nLowQualityVariantMolecules = moleculeCounts.getNLowQualityVariant();
-        final long nCalledVariantMolecules = moleculeCounts.getCalledVariant();
-        final long totalMolecules = moleculeCounts.getTotal();
-        writer.write(">>>" + moleculeCounts.getLabel(0) + ":\t" + nInconsistentPairs + "\t" +
-                df.format(100. * nInconsistentPairs / totalMolecules) + "%");
-        writer.newLine();
-        writer.write(">>>" + moleculeCounts.getLabel(1) + ":\t" + nWildTypeMolecules + "\t" +
-                df.format(100. * nWildTypeMolecules / totalMolecules) + "%");
-        writer.newLine();
-        writer.write(">>>" + moleculeCounts.getLabel(2) + ":\t" + nInsufficientFlankMolecules + "\t" +
-                df.format(100. * nInsufficientFlankMolecules / totalMolecules) + "%");
-        writer.newLine();
-        writer.write(">>>" + moleculeCounts.getLabel(3) + ":\t" + nLowQualityVariantMolecules + "\t" +
-                df.format(100. * nLowQualityVariantMolecules / totalMolecules) + "%");
-        writer.newLine();
-        writer.write(">>>" + moleculeCounts.getLabel(4) + ":\t" + nCalledVariantMolecules + "\t" +
-                df.format(100. * nCalledVariantMolecules / totalMolecules) + "%");
-        writer.newLine();
+                                             final BufferedWriter writer ) throws IOException {
+        final long totalCounts = counts.totalCounts();
+        for ( final ReportType reportType : ReportType.values() ) {
+            final long count = counts.getCount(reportType);
+            if ( count != 0 ) {
+                writer.write(">>>" + reportType.label + ":\t" + count + "\t" +
+                        df.format(100. * count / totalCounts) + "%");
+                writer.newLine();
+            }
+        }
     }
 
     private static void writeCoverageSizeHistogram() {
@@ -589,6 +574,42 @@ public final class AnalyzeSaturationMutagenesis extends GATKTool {
             }
         } catch ( final IOException ioe ) {
             throw new UserException("Can't write " + trimCountsFile, ioe);
+        }
+    }
+
+    enum ReportType {
+        UNMAPPED("unmapped", "Unmapped Reads"),
+        LOW_QUALITY("lowQ", "LowQ Reads"),
+        EVALUABLE(null, "Evaluable Reads"),
+        INCONSISTENT("inconsistent", "Inconsistent pair"),
+        IGNORED_MATE("ignoredMate", "Mate ignored"),
+        LOW_Q_VAR("lowQVar", "Low quality variation"),
+        NO_FLANK("noFlank", "Insufficient flank"),
+        CALLED_VARIANT(null, "Called variants"),
+        WILD_TYPE(null, "Wild type");
+
+        public final String attributeValue; // value for tagging rejected reads.  when null, don't tag the read.
+        public final String label;
+
+        private ReportType( final String attributeValue, final String label ) {
+            this.attributeValue = attributeValue;
+            this.label = label;
+        }
+
+        public final static String REPORT_TYPE_ATTRIBUTE_KEY = "XX";
+    }
+
+    private final static class ReportTypeCounts {
+        private long[] counts = new long[ReportType.values().length];
+
+        public void bumpCount( final ReportType reportType ) {
+            counts[reportType.ordinal()] += 1;
+        }
+        public long getCount( final ReportType reportType ) {
+            return counts[reportType.ordinal()];
+        }
+        public long totalCounts() {
+            return Arrays.stream(counts).sum();
         }
     }
 
@@ -660,60 +681,6 @@ public final class AnalyzeSaturationMutagenesis extends GATKTool {
             }
             coverageSizeHistogram[coverageLen] += 1;
             return coverageLen;
-        }
-    }
-
-    @VisibleForTesting final static class ReadCounts {
-        private long nReadsTotal = 0; // total number of reads in input bam
-        private long nReadsUnmapped = 0; // number of unmapped reads in bam
-        private long nReadsLowQuality = 0; // number of reads where trimming made the read disappear
-        private long nReadsEvaluable = 0; // number of reads that can be evaluated for variants
-        private long nTotalBaseCalls = 0; // number of base calls over all reads in bam (mapped or not, call trimmed or not)
-
-        public void bumpNReads() { nReadsTotal += 1; }
-        public long getNReads() { return nReadsTotal; }
-
-        public void bumpNReadsUnmapped() { nReadsUnmapped += 1; }
-        public long getNReadsUnmapped() { return nReadsUnmapped; }
-
-        public void bumpNLowQualityReads() { nReadsLowQuality += 1; }
-        public long getNReadsLowQuality() { return nReadsLowQuality; }
-
-        public void bumpNReadsEvaluable() { nReadsEvaluable += 1; }
-        public long getNReadsEvaluable() { return nReadsEvaluable; }
-
-        public void addBaseCalls( final long nBases ) { nTotalBaseCalls += nBases; }
-        public long getNTotalBaseCalls() { return nTotalBaseCalls; }
-    }
-
-    // a bunch of mutually exclusive counts of molecules
-    @VisibleForTesting final static class MoleculeCounts {
-        private final String[] categoryLabels;
-        private long nWildType = 0; // number of molecules in which no variation from reference was detected
-        private long nInconsistentPairs = 0; // number of molecules where mates with conflicting variants in overlap region
-        private long nInsufficientFlank = 0; // number of molecules where variation was too close to end of region
-        private long nLowQualityVariant = 0; // number of molecules where a variation was called with low quality
-        private long nCalledVariant = 0; // number of molecules with a least one variant
-
-        public MoleculeCounts( final String[] categoryLabels ) { this.categoryLabels = categoryLabels; }
-        public String getLabel( final int idx ) { return categoryLabels[idx]; }
-        public void bumpNWildType() { nWildType += 1; }
-        public long getNWildType() { return nWildType; }
-
-        // this isn't a mistake.  it's an ugly hack.
-        // we're reusing the inconsistent pairs bucket for the rejected mates count for disjoint pairs.
-        public void bumpRejectedMates() { nInconsistentPairs += 1; }
-
-        public void bumpInconsistentPairs() { nInconsistentPairs += 1; }
-        public long getNInconsistentPairs() { return nInconsistentPairs; }
-        public void bumpInsufficientFlank() { nInsufficientFlank += 1; }
-        public long getNInsufficientFlank() { return nInsufficientFlank; }
-        public void bumpNLowQualityVariant() { nLowQualityVariant += 1; }
-        public long getNLowQualityVariant() { return nLowQualityVariant; }
-        public void bumpCalledVariant() { nCalledVariant += 1; }
-        public long getCalledVariant() { return nCalledVariant; }
-        public long getTotal() {
-            return nWildType + nInconsistentPairs + nInsufficientFlank + nLowQualityVariant + nCalledVariant;
         }
     }
 
@@ -1423,28 +1390,22 @@ public final class AnalyzeSaturationMutagenesis extends GATKTool {
         }
 
         // apply the report: update reference coverage, translate SNVs to codon values, and count 'em all up
-        // the return is a description of the reason for rejection (if the report is rejected, otherwise null)
-        //   the reason for rejection will be added as an attribute of the read, and the read will be copied
-        //   to an output BAM (if the user indicated a desire for one).
-        public String updateCounts( final MoleculeCounts moleculeCounts,
-                                    final CodonTracker codonTracker,
-                                    final HopscotchMap<SNVCollectionCount, Long, SNVCollectionCount> variationCounts,
-                                    final Reference reference ) {
+        public ReportType updateCounts( final CodonTracker codonTracker,
+                                        final HopscotchMap<SNVCollectionCount, Long, SNVCollectionCount> variationCounts,
+                                        final Reference reference ) {
             final List<Interval> refCoverage = getRefCoverage();
-            if ( refCoverage.isEmpty() ) return null;
-
+            if ( refCoverage.isEmpty() ) {
+                return ReportType.LOW_QUALITY;
+            }
             if ( snvList == null ) {
-                moleculeCounts.bumpInconsistentPairs();
-                return "inconsistent";
+                return ReportType.INCONSISTENT;
             }
             if ( snvList.stream().anyMatch(
                     snv -> snv.getQuality() < minQ || "-ACGT".indexOf(snv.getVariantCall()) == -1) ) {
-                moleculeCounts.bumpNLowQualityVariant();
-                return "lowQVar";
+                return ReportType.LOW_Q_VAR;
             }
             if ( !hasCleanFlanks(minFlankingLength, reference.getRefSeqLength()) ) {
-                moleculeCounts.bumpInsufficientFlank();
-                return "noFlank";
+                return ReportType.NO_FLANK;
             }
 
             final int coverage = reference.updateCoverage(refCoverage);
@@ -1452,20 +1413,19 @@ public final class AnalyzeSaturationMutagenesis extends GATKTool {
             reference.updateSpan(totalCoverage);
 
             if ( snvList.isEmpty() ) {
-                moleculeCounts.bumpNWildType();
                 codonTracker.reportWildCodonCounts(totalCoverage);
-            } else {
-                moleculeCounts.bumpCalledVariant();
-                codonTracker.reportVariantCodonCounts(totalCoverage, codonTracker.encodeSNVsAsCodons(snvList));
-                final SNVCollectionCount newVal = new SNVCollectionCount(snvList, coverage);
-                final SNVCollectionCount oldVal = variationCounts.find(newVal);
-                if ( oldVal != null ) {
-                    oldVal.bumpCount(coverage);
-                } else {
-                    variationCounts.add(newVal);
-                }
+                return ReportType.WILD_TYPE;
             }
-            return null;
+
+            codonTracker.reportVariantCodonCounts(totalCoverage, codonTracker.encodeSNVsAsCodons(snvList));
+            final SNVCollectionCount newVal = new SNVCollectionCount(snvList, coverage);
+            final SNVCollectionCount oldVal = variationCounts.find(newVal);
+            if ( oldVal != null ) {
+                oldVal.bumpCount(coverage);
+            } else {
+                variationCounts.add(newVal);
+            }
+            return ReportType.CALLED_VARIANT;
         }
 
         private static List<Interval> combineCoverage( final ReadReport report1, final ReadReport report2 ) {
@@ -1584,42 +1544,32 @@ public final class AnalyzeSaturationMutagenesis extends GATKTool {
     }
 
     @VisibleForTesting static ReadReport getReadReport( final GATKRead read ) {
-        readCounts.bumpNReads();
-        readCounts.addBaseCalls(read.getLength());
+        totalBaseCalls += read.getLength();
 
         if ( read.isUnmapped() || read.isDuplicate() || read.failsVendorQualityCheck() ) {
-            return documentUnmappedRead(read);
+            return rejectRead(read, ReportType.UNMAPPED);
         }
 
         Interval trim = calculateTrim(read);
         if ( trim.size() < minLength ) {
-            return documentLowQualityRead(read);
+            return rejectRead(read, ReportType.LOW_QUALITY);
         }
 
         final ReadReport readReport = new ReadReport(read, trim, reference.getRefSeq());
         if ( readReport.getRefCoverage().isEmpty() ) {
-            return documentLowQualityRead(read);
+            return rejectRead(read, ReportType.LOW_QUALITY);
         }
 
-        readCounts.bumpNReadsEvaluable();
+        readCounts.bumpCount(ReportType.EVALUABLE);
         return readReport;
     }
 
-    private static ReadReport documentUnmappedRead( final GATKRead read ) {
+    private static ReadReport rejectRead( final GATKRead read, final ReportType reportType ) {
+        readCounts.bumpCount(reportType);
         if ( bamWriter != null ) {
-            read.setAttribute(EXCLUSION_CAUSE_ATTRIBUTE_KEY, "unmapped");
+            read.setAttribute(ReportType.REPORT_TYPE_ATTRIBUTE_KEY, reportType.attributeValue);
             bamWriter.addRead(read);
         }
-        readCounts.bumpNReadsUnmapped();
-        return ReadReport.NULL_REPORT;
-    }
-
-    private static ReadReport documentLowQualityRead( final GATKRead read ) {
-        if ( bamWriter != null ) {
-            read.setAttribute(EXCLUSION_CAUSE_ATTRIBUTE_KEY, "lowQ");
-            bamWriter.addRead(read);
-        }
-        readCounts.bumpNLowQualityReads();
         return ReadReport.NULL_REPORT;
     }
 
@@ -1687,55 +1637,54 @@ public final class AnalyzeSaturationMutagenesis extends GATKTool {
     @VisibleForTesting static void updateCountsForPair( final GATKRead read1, final ReadReport report1,
                                                         final GATKRead read2, final ReadReport report2 ) {
         if ( report1.getRefCoverage().isEmpty() ) {
-            processReport(read2, report2, moleculeCountsDisjointPair);
+            if ( !report2.getRefCoverage().isEmpty() ) {
+                processReport(read2, report2, disjointPairCounts);
+            }
         } else if ( report2.getRefCoverage().isEmpty() ) {
-            processReport(read1, report1, moleculeCountsDisjointPair);
+            if ( !report1.getRefCoverage().isEmpty() ) {
+                processReport(read1, report1, disjointPairCounts);
+            }
         } else {
             final int overlapStart = Math.max(report1.getFirstRefIndex(), report2.getFirstRefIndex());
             final int overlapEnd = Math.min(report1.getLastRefIndex(), report2.getLastRefIndex());
             if ( overlapStart <= overlapEnd ) { // if mates overlap, or are adjacent
                 final ReadReport combinedReport = new ReadReport(report1, report2);
-                final String excuse =
-                    combinedReport.updateCounts(moleculeCountsOverlappingPair, codonTracker, variationCounts, reference);
-                if ( excuse != null && bamWriter != null ) {
-                    read1.setAttribute(EXCLUSION_CAUSE_ATTRIBUTE_KEY, excuse);
+                final ReportType reportType = combinedReport.updateCounts(codonTracker, variationCounts, reference);
+                overlappingPairCounts.bumpCount(reportType);
+                if ( reportType.attributeValue != null && bamWriter != null ) {
+                    read1.setAttribute(ReportType.REPORT_TYPE_ATTRIBUTE_KEY, reportType.attributeValue);
                     bamWriter.addRead(read1);
-                    read2.setAttribute(EXCLUSION_CAUSE_ATTRIBUTE_KEY, excuse);
+                    read2.setAttribute(ReportType.REPORT_TYPE_ATTRIBUTE_KEY, reportType.attributeValue);
                     bamWriter.addRead(read2);
                 }
             } else { // mates are disjoint
-                final String ignoredMate = "ignoredMate";
+                final ReportType ignoredMate = ReportType.IGNORED_MATE;
                 if ( read1.isFirstOfPair() ) {
-                    processReport(read1, report1, moleculeCountsDisjointPair);
+                    processReport(read1, report1, disjointPairCounts);
                     if ( bamWriter != null ) {
-                        read2.setAttribute(EXCLUSION_CAUSE_ATTRIBUTE_KEY, ignoredMate);
+                        read2.setAttribute(ReportType.REPORT_TYPE_ATTRIBUTE_KEY, ignoredMate.attributeValue);
                         bamWriter.addRead(read2);
                     }
                 } else {
-                    processReport(read2, report2, moleculeCountsDisjointPair);
+                    processReport(read2, report2, disjointPairCounts);
                     if ( bamWriter != null ) {
-                        read1.setAttribute(EXCLUSION_CAUSE_ATTRIBUTE_KEY, ignoredMate);
+                        read1.setAttribute(ReportType.REPORT_TYPE_ATTRIBUTE_KEY, ignoredMate.attributeValue);
                         bamWriter.addRead(read1);
                     }
                 }
-                moleculeCountsDisjointPair.bumpRejectedMates();
+                disjointPairCounts.bumpCount(ignoredMate);
             }
         }
     }
 
     private static void processReport( final GATKRead read,
                                        final ReadReport readReport,
-                                       final MoleculeCounts moleculeCounts ) {
-        try {
-            final String excuse = readReport.updateCounts(moleculeCounts, codonTracker, variationCounts, reference);
-            if ( excuse != null && bamWriter != null ) {
-                read.setAttribute(EXCLUSION_CAUSE_ATTRIBUTE_KEY, excuse);
-                bamWriter.addRead(read);
-            }
-        } catch ( final Exception exception ) {
-            throw new GATKException(
-                    "Caught unexpected exception on read " + readCounts.getNReads() + ": " + read.getName(),
-                    exception);
+                                       final ReportTypeCounts counts ) {
+        final ReportType reportType = readReport.updateCounts(codonTracker, variationCounts, reference);
+        counts.bumpCount(reportType);
+        if ( reportType.attributeValue != null && bamWriter != null ) {
+            read.setAttribute(ReportType.REPORT_TYPE_ATTRIBUTE_KEY, reportType.attributeValue);
+            bamWriter.addRead(read);
         }
     }
 }
