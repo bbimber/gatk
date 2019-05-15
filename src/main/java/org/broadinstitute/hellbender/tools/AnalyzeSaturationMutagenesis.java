@@ -167,7 +167,7 @@ public final class AnalyzeSaturationMutagenesis extends GATKTool {
         "TAA", "TAC", "TAG", "TAT", "TCA", "TCC", "TCG", "TCT", "TGA", "TGC", "TGG", "TGT", "TTA", "TTC", "TTG", "TTT"
     };
 
-    static final String EXCUSE_ATTRIBUTE = "XX";
+    static final String EXCLUSION_CAUSE_ATTRIBUTE_KEY = "XX";
 
     @Override
     public boolean requiresReads() {
@@ -203,45 +203,26 @@ public final class AnalyzeSaturationMutagenesis extends GATKTool {
         final Stream<GATKRead> reads = getTransformedReadStream(ReadFilterLibrary.PRIMARY_LINE);
 
         if ( !pairedMode ) {
-            reads.forEach(read -> {
-                try {
-                    processReport(read, getReadReport(read), moleculeCountsUnpaired);
-                } catch ( final Exception e ) {
-                    final String readName = read.getName();
-                    throw new GATKException("Caught unexpected exception on read " +
-                            readCounts.getNReads() + ": " + readName, e);
-                }});
+            reads.forEach(read -> processReport(read, getReadReport(read), moleculeCountsUnpaired));
         } else {
             read1 = null;
             reads.forEach(read -> {
-                try {
-                    if ( !read.isPaired() ) {
-                        processReport(read, getReadReport(read), moleculeCountsUnpaired);
-                    } else if ( read1 == null ) {
-                        read1 = read;
-                    } else if ( !read1.getName().equals(read.getName()) ) {
-                        logger.warn("Read " + read1.getName() + " has no mate.");
-                        processReport(read1, getReadReport(read1), moleculeCountsUnpaired);
-                        read1 = read;
-                    } else {
-                        updateCountsForPair(read1, getReadReport(read1), read, getReadReport(read));
-                        read1 = null;
-                    }
-                } catch ( final Exception e ) {
-                    final String readName = read.getName();
-                    throw new GATKException("Caught unexpected exception on read " +
-                            readCounts.getNReads() + ": " + readName, e);
-                }});
+                if ( !read.isPaired() ) {
+                    processReport(read, getReadReport(read), moleculeCountsUnpaired);
+                } else if ( read1 == null ) {
+                    read1 = read;
+                } else if ( !read1.getName().equals(read.getName()) ) {
+                    logger.warn("Read " + read1.getName() + " has no mate.");
+                    processReport(read1, getReadReport(read1), moleculeCountsUnpaired);
+                    read1 = read;
+                } else {
+                    updateCountsForPair(read1, getReadReport(read1), read, getReadReport(read));
+                    read1 = null;
+                }
+            });
             if ( read1 != null ) {
                 logger.warn("Read " + read1.getName() + " has no mate.");
-                try {
-                    final ReadReport report = getReadReport(read1);
-                    report.updateCounts(moleculeCountsUnpaired, codonTracker, variationCounts, reference);
-                } catch ( final Exception e ) {
-                    final String readName = read1.getName();
-                    throw new GATKException("Caught unexpected exception on read " +
-                            readCounts.getNReads() + ": " + readName, e);
-                }
+                processReport(read1, getReadReport(read1), moleculeCountsUnpaired);
             }
         }
     }
@@ -718,6 +699,11 @@ public final class AnalyzeSaturationMutagenesis extends GATKTool {
         public String getLabel( final int idx ) { return categoryLabels[idx]; }
         public void bumpNWildType() { nWildType += 1; }
         public long getNWildType() { return nWildType; }
+
+        // this isn't a mistake.  it's an ugly hack.
+        // we're reusing the inconsistent pairs bucket for the rejected mates count for disjoint pairs.
+        public void bumpRejectedMates() { nInconsistentPairs += 1; }
+
         public void bumpInconsistentPairs() { nInconsistentPairs += 1; }
         public long getNInconsistentPairs() { return nInconsistentPairs; }
         public void bumpInsufficientFlank() { nInsufficientFlank += 1; }
@@ -1437,6 +1423,9 @@ public final class AnalyzeSaturationMutagenesis extends GATKTool {
         }
 
         // apply the report: update reference coverage, translate SNVs to codon values, and count 'em all up
+        // the return is a description of the reason for rejection (if the report is rejected, otherwise null)
+        //   the reason for rejection will be added as an attribute of the read, and the read will be copied
+        //   to an output BAM (if the user indicated a desire for one).
         public String updateCounts( final MoleculeCounts moleculeCounts,
                                     final CodonTracker codonTracker,
                                     final HopscotchMap<SNVCollectionCount, Long, SNVCollectionCount> variationCounts,
@@ -1602,28 +1591,9 @@ public final class AnalyzeSaturationMutagenesis extends GATKTool {
             return documentUnmappedRead(read);
         }
 
-        Interval trim = calculateTrim(read.getBaseQualitiesNoCopy());
-        if ( trim.size() == 0 ) {
+        Interval trim = calculateTrim(read);
+        if ( trim.size() < minLength ) {
             return documentLowQualityRead(read);
-        }
-
-        // don't process past end of fragment when fragment length < read length
-        if ( read.isProperlyPaired() ) {
-            final int fragmentLength = Math.abs(read.getFragmentLength());
-            if ( read.isReverseStrand() ) {
-                final int minStart = read.getLength() - fragmentLength;
-                if ( trim.getStart() < minStart ) {
-                    if ( trim.getEnd() - minStart <  minLength ) {
-                        return documentLowQualityRead(read);
-                    }
-                    trim = new Interval(minStart, trim.getEnd());
-                }
-            } else if ( fragmentLength < trim.getEnd() ) {
-                if ( fragmentLength - trim.getStart() < minLength ) {
-                    return documentLowQualityRead(read);
-                }
-                trim = new Interval(trim.getStart(), fragmentLength);
-            }
         }
 
         final ReadReport readReport = new ReadReport(read, trim, reference.getRefSeq());
@@ -1637,7 +1607,7 @@ public final class AnalyzeSaturationMutagenesis extends GATKTool {
 
     private static ReadReport documentUnmappedRead( final GATKRead read ) {
         if ( bamWriter != null ) {
-            read.setAttribute(EXCUSE_ATTRIBUTE, "unmapped");
+            read.setAttribute(EXCLUSION_CAUSE_ATTRIBUTE_KEY, "unmapped");
             bamWriter.addRead(read);
         }
         readCounts.bumpNReadsUnmapped();
@@ -1645,15 +1615,19 @@ public final class AnalyzeSaturationMutagenesis extends GATKTool {
     }
 
     private static ReadReport documentLowQualityRead( final GATKRead read ) {
-        read.setAttribute(EXCUSE_ATTRIBUTE, "lowQ");
         if ( bamWriter != null ) {
+            read.setAttribute(EXCLUSION_CAUSE_ATTRIBUTE_KEY, "lowQ");
             bamWriter.addRead(read);
-            readCounts.bumpNLowQualityReads();
         }
+        readCounts.bumpNLowQualityReads();
         return ReadReport.NULL_REPORT;
     }
 
-    @VisibleForTesting static Interval calculateTrim( final byte[] quals ) {
+    private static Interval calculateTrim( final GATKRead read ) {
+        return calculateShortFragmentTrim(read, calculateQualityTrim(read.getBaseQualitiesNoCopy()));
+    }
+
+    @VisibleForTesting static Interval calculateQualityTrim( final byte[] quals ) {
         // find initial end-trim
         int readStart = 0;
         int hiQCount = 0;
@@ -1686,6 +1660,30 @@ public final class AnalyzeSaturationMutagenesis extends GATKTool {
         return new Interval(readStart, readEnd);
     }
 
+    private static Interval calculateShortFragmentTrim( final GATKRead read, final Interval qualityTrim ) {
+        if ( qualityTrim.size() < minLength ) return qualityTrim;
+
+        // don't process past end of fragment when fragment length < read length
+        if ( read.isProperlyPaired() ) {
+            final int fragmentLength = Math.abs(read.getFragmentLength());
+            if ( read.isReverseStrand() ) { // the read has been RC'd: trim its beginning if necessary
+                final int minStart = read.getLength() - fragmentLength;
+                if ( qualityTrim.getStart() < minStart ) {
+                    if ( qualityTrim.getEnd() - minStart < minLength ) { // if there are too few calls left
+                        return Interval.NULL_INTERVAL;
+                    }
+                    return new Interval(minStart, qualityTrim.getEnd());
+                }
+            } else if ( fragmentLength < qualityTrim.getEnd() ) { // trim the end of the read, if necessary
+                if ( fragmentLength - qualityTrim.getStart() < minLength ) { // if there are too few calls left
+                    return Interval.NULL_INTERVAL;
+                }
+                return new Interval(qualityTrim.getStart(), fragmentLength);
+            }
+        }
+        return qualityTrim;
+    }
+
     @VisibleForTesting static void updateCountsForPair( final GATKRead read1, final ReadReport report1,
                                                         final GATKRead read2, final ReadReport report2 ) {
         if ( report1.getRefCoverage().isEmpty() ) {
@@ -1700,9 +1698,9 @@ public final class AnalyzeSaturationMutagenesis extends GATKTool {
                 final String excuse =
                     combinedReport.updateCounts(moleculeCountsOverlappingPair, codonTracker, variationCounts, reference);
                 if ( excuse != null && bamWriter != null ) {
-                    read1.setAttribute(EXCUSE_ATTRIBUTE, excuse);
+                    read1.setAttribute(EXCLUSION_CAUSE_ATTRIBUTE_KEY, excuse);
                     bamWriter.addRead(read1);
-                    read2.setAttribute(EXCUSE_ATTRIBUTE, excuse);
+                    read2.setAttribute(EXCLUSION_CAUSE_ATTRIBUTE_KEY, excuse);
                     bamWriter.addRead(read2);
                 }
             } else { // mates are disjoint
@@ -1710,17 +1708,17 @@ public final class AnalyzeSaturationMutagenesis extends GATKTool {
                 if ( read1.isFirstOfPair() ) {
                     processReport(read1, report1, moleculeCountsDisjointPair);
                     if ( bamWriter != null ) {
-                        read2.setAttribute(EXCUSE_ATTRIBUTE, ignoredMate);
+                        read2.setAttribute(EXCLUSION_CAUSE_ATTRIBUTE_KEY, ignoredMate);
                         bamWriter.addRead(read2);
                     }
                 } else {
                     processReport(read2, report2, moleculeCountsDisjointPair);
                     if ( bamWriter != null ) {
-                        read1.setAttribute(EXCUSE_ATTRIBUTE, ignoredMate);
+                        read1.setAttribute(EXCLUSION_CAUSE_ATTRIBUTE_KEY, ignoredMate);
                         bamWriter.addRead(read1);
                     }
                 }
-                moleculeCountsDisjointPair.bumpInconsistentPairs();
+                moleculeCountsDisjointPair.bumpRejectedMates();
             }
         }
     }
@@ -1728,10 +1726,16 @@ public final class AnalyzeSaturationMutagenesis extends GATKTool {
     private static void processReport( final GATKRead read,
                                        final ReadReport readReport,
                                        final MoleculeCounts moleculeCounts ) {
-        final String excuse = readReport.updateCounts(moleculeCounts, codonTracker, variationCounts, reference);
-        if ( excuse != null && bamWriter != null ) {
-            read.setAttribute(EXCUSE_ATTRIBUTE, excuse);
-            bamWriter.addRead(read);
+        try {
+            final String excuse = readReport.updateCounts(moleculeCounts, codonTracker, variationCounts, reference);
+            if ( excuse != null && bamWriter != null ) {
+                read.setAttribute(EXCLUSION_CAUSE_ATTRIBUTE_KEY, excuse);
+                bamWriter.addRead(read);
+            }
+        } catch ( final Exception exception ) {
+            throw new GATKException(
+                    "Caught unexpected exception on read " + readCounts.getNReads() + ": " + read.getName(),
+                    exception);
         }
     }
 }

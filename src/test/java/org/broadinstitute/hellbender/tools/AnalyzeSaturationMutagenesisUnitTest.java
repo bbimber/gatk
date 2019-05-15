@@ -523,20 +523,20 @@ public class AnalyzeSaturationMutagenesisUnitTest extends GATKBaseTest {
         final byte GOOD_Q = (byte)minQ;
         final byte[] quals = new byte[100];
         Arrays.fill(quals, BAD_Q);
-        Assert.assertEquals(calculateTrim(quals).size(), 0);
+        Assert.assertEquals(calculateQualityTrim(quals).size(), 0);
         Arrays.fill(quals, GOOD_Q);
-        Assert.assertEquals(calculateTrim(quals), new Interval(0, 100));
+        Assert.assertEquals(calculateQualityTrim(quals), new Interval(0, 100));
         quals[minLength] = BAD_Q;
-        Assert.assertEquals(calculateTrim(quals), new Interval(0, 100));
+        Assert.assertEquals(calculateQualityTrim(quals), new Interval(0, 100));
         quals[minLength - 1] = BAD_Q;
-        Assert.assertEquals(calculateTrim(quals), new Interval(minLength + 1, 100));
+        Assert.assertEquals(calculateQualityTrim(quals), new Interval(minLength + 1, 100));
         quals[quals.length - minLength] = BAD_Q;
-        Assert.assertEquals(calculateTrim(quals), new Interval(minLength + 1, quals.length - minLength));
+        Assert.assertEquals(calculateQualityTrim(quals), new Interval(minLength + 1, quals.length - minLength));
         Arrays.fill(quals, GOOD_Q);
         for ( int idx = minLength - 1; idx < quals.length; idx += minLength ) {
             quals[idx] = BAD_Q;
         }
-        Assert.assertEquals(calculateTrim(quals).size(), 0);
+        Assert.assertEquals(calculateQualityTrim(quals).size(), 0);
     }
 
     @Test
