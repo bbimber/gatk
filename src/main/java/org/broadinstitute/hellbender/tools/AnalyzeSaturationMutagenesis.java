@@ -581,12 +581,12 @@ public final class AnalyzeSaturationMutagenesis extends GATKTool {
         UNMAPPED("unmapped", "Unmapped Reads"),
         LOW_QUALITY("lowQ", "LowQ Reads"),
         EVALUABLE(null, "Evaluable Reads"),
+        WILD_TYPE(null, "Wild type"),
+        CALLED_VARIANT(null, "Called variants"),
         INCONSISTENT("inconsistent", "Inconsistent pair"),
         IGNORED_MATE("ignoredMate", "Mate ignored"),
         LOW_Q_VAR("lowQVar", "Low quality variation"),
-        NO_FLANK("noFlank", "Insufficient flank"),
-        CALLED_VARIANT(null, "Called variants"),
-        WILD_TYPE(null, "Wild type");
+        NO_FLANK("noFlank", "Insufficient flank");
 
         public final String attributeValue; // value for tagging rejected reads.  when null, don't tag the read.
         public final String label;
@@ -599,7 +599,7 @@ public final class AnalyzeSaturationMutagenesis extends GATKTool {
         public final static String REPORT_TYPE_ATTRIBUTE_KEY = "XX";
     }
 
-    private final static class ReportTypeCounts {
+    public final static class ReportTypeCounts {
         private long[] counts = new long[ReportType.values().length];
 
         public void bumpCount( final ReportType reportType ) {
