@@ -16,7 +16,6 @@ task FuncotateSegments {
     File ref_fasta_dict
     String funcotator_ref_version
     File? gatk4_jar_override
-    String output_base_name
     File? funcotator_data_sources_tar_gz = "gs://broad-public-datasets/funcotator/funcotator_dataSources.v1.6.20190124s.tar.gz"
     String? transcript_selection_mode = "CANONICAL"
     File? transcript_selection_list
@@ -25,6 +24,8 @@ task FuncotateSegments {
     Array[String]? funcotator_excluded_fields
     File? interval_list
     String? extra_args
+
+    # Set to true when running local or on-prem
     Boolean? is_removing_untared_datasources
 
     # Runtime parameters
@@ -51,8 +52,9 @@ task FuncotateSegments {
     String excluded_fields_args = if defined(funcotator_excluded_fields) then " --exclude-field " else ""
     String interval_list_arg = if defined(interval_list) then " -L " else ""
     String extra_args_arg = select_first([extra_args, ""])
-    Boolean is_removing_untared_datasources_final = select_first([is_removing_untared_datasources, false])
+    Boolean is_removing_untared_datasources_final = select_first([is_removing_untared_datasources, true])
     String removing_untared_datasources = if is_removing_untared_datasources_final then " rm -Rf $DATA_SOURCES_FOLDER " else " echo Not bothering to remove datasources"
+    String basename_input_seg_file = basename(input_seg_file)
 
     command <<<
         set -e
@@ -71,7 +73,7 @@ task FuncotateSegments {
              --output-file-format SEG \
              -R ${ref_fasta} \
               --segments ${input_seg_file} \
-             -O ${output_base_name}.seg \
+             -O ${basename_input_seg_file}.funcotated.tsv \
              ${interval_list_arg} ${default="" interval_list} \
              ${"--transcript-selection-mode " + transcript_selection_mode} \
              ${transcript_selection_arg}${default="" sep=" --transcript-list " transcript_selection_list} \
