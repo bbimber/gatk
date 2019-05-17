@@ -1,6 +1,55 @@
 workflow CNVFuncotateSegmentsWorkflow {
 
-    call FuncotateSegments
+    File input_seg_file
+    File ref_fasta
+    File ref_fasta_fai
+    File ref_fasta_dict
+    String funcotator_ref_version
+    File? gatk4_jar_override
+    File? funcotator_data_sources_tar_gz
+    String? transcript_selection_mode
+    File? transcript_selection_list
+    Array[String]? annotation_defaults
+    Array[String]? annotation_overrides
+    Array[String]? funcotator_excluded_fields
+    File? interval_list
+    String? extra_args
+
+    # Set to true when running local or on-prem
+    Boolean? is_removing_untared_datasources
+
+    # Runtime parameters
+    String gatk_docker
+    Int? mem_gb
+    Int? disk_space_gb
+    Boolean use_ssd = false
+    Int? cpu
+    Int? preemptible_attempts
+
+    call FuncotateSegments {
+        input:
+            input_seg_file = input_seg_file,
+            ref_fasta = ref_fasta,
+            ref_fasta_fai = ref_fasta_fai,
+            ref_fasta_dict = ref_fasta_dict,
+            funcotator_ref_version = funcotator_ref_version,
+            gatk4_jar_override = gatk4_jar_override,
+            funcotator_data_sources_tar_gz = funcotator_data_sources_tar_gz,
+            transcript_selection_mode = transcript_selection_mode,
+            transcript_selection_list = transcript_selection_list,
+            annotation_defaults = annotation_defaults,
+            annotation_overrides = annotation_overrides,
+            funcotator_excluded_fields = funcotator_excluded_fields,
+            interval_list = interval_list,
+            extra_args = extra_args,
+            is_removing_untared_datasources = is_removing_untared_datasources,
+            gatk_docker = gatk_docker,
+            mem_gb = mem_gb,
+            disk_space_gb = disk_space_gb,
+            use_ssd = use_ssd,
+            cpu = cpu,
+            preemptible_attempts = preemptible_attempts
+    }
 
     output {
         File funcotated_seg_simple_tsv = FuncotateSegments.funcotated_seg_simple_tsv
