@@ -96,7 +96,7 @@ task FuncotateSegments {
     }
 
     output {
-        File funcotated_seg_simple_tsv = "${output_base_name}.seg"
-        File funcotated_gene_list_tsv = "${output_base_name}.seg.gene_list.txt"
+        File funcotated_seg_simple_tsv = "${basename_input_seg_file}.funcotated.tsv"
+        File funcotated_gene_list_tsv = "${basename_input_seg_file}.funcotated.tsv.gene_list.txt"
     }
 }
